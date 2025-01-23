@@ -886,77 +886,97 @@ have_img2sixel(void)
     }
 }
 
-/* NB: in theory, user input could be snarfed up with the read(2); in
- * practice, only museum pieces have such low latency, so we should get
- * the device attributes (and only the device attributes) immediately. If
- * ever this becomes an issue (which it won't), ungetch(3) can be used on
- * any extraneous input */
+static void *
+realloc_or_free(void *const orig_ptr, size_t n)
+{
+    void *const new_ptr = realloc(orig_ptr, n);
+    if (!new_ptr)
+	free(orig_ptr);
+    return new_ptr;
+}
+
+/*
+ * NB: in theory, user input could be snarfed up with the read(2); in practice,
+ * only museum pieces have such low latency, so we should get the device
+ * attributes (and only the device attributes) immediately. If ever this becomes
+ * an issue (which it won't), ungetch(3) can be used on any extraneous input
+ */
 int
 img_protocol_test_for_sixel(void)
 {
     static const char errstr[] = "Can't get terminal attributes";
-
-    /* the string in the following sizeof expression is what I think the
-     * largest possible response could be. See
-     *	https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
-     * for more information, specifically the section on CSI Ps c ("\e[c") */
-    char term_response[sizeof "\033[?65;1;2;3;4;6;8;9;15;16;17;18;21;22;28;29c"] = "";
-    char * ptr; /* general-purpose pointer to the above buffer */
-    ssize_t nchars_read;
+    int ret = INLINE_IMG_NONE;
+    size_t response_size, len;
+    char *response;
 
     /* request tty send primary device attributes */
     write(tty, "\033[c", 3);
 
-    /* wait for stdin to become available; don't let us get stuck hanging
-     * indefinitely on a response that won't come */
-    {
+    /* loop until we get the whole response */
+    for (
+	response = NULL, response_size = 256, len = 0;
+	(response = realloc_or_free(response, response_size)) != NULL;
+	response_size *= 2
+    ) {
+	ssize_t nchars_read;
 	int nret;
 	fd_set fds;
-	struct timeval timeout = { 0, 0.2 * 1000000 }; /* wait 0.2s, from terms.c */
+	/* wait 0.2s (from get_pixel_per_char()) for input */
+	struct timeval timeout = { 0, 0.2 * 1000000 };
 	FD_ZERO(&fds);
 	FD_SET(tty, &fds);
 	if ((nret = select(tty + 1, &fds, NULL, NULL, &timeout)) <= 0) {
-	    fprintf(stderr, "%s: %s\n", errstr, nret == 0 ? "timed out" : strerror(errno));
-	    return INLINE_IMG_NONE;
+	    fprintf(stderr, "%s: %s\n",
+		errstr, nret == 0 ? "timed out" : strerror(errno));
+	    goto end;
 	}
+
+	nchars_read = read(tty, response + len, response_size - len - 1);
+	if (nchars_read < 0) {
+	    perror(errstr);
+	    goto end;
+	}
+
+	/* first useful iteration; validate response */
+	if (nchars_read + len >= 3 && memcmp(response, "\033[?", 3) != 0) {
+	    fputs("Malformed terminal attributes\n", stderr);
+	    goto end;
+	}
+
+	/* NUL-terminate the terminal response */
+	{
+	    char *ptr = memchr(response + len, 'c', nchars_read);
+	    if (ptr) {
+		ptr[1] = '\0';
+		break;
+	    }
+	}
+
+	/* if we can't find 'c', then the response is incomplete; try again */
+	len += (size_t)nchars_read;
     }
-
-    if ((nchars_read = read(tty, term_response, sizeof term_response - 1)) == -1) {
-	perror(errstr);
-	return INLINE_IMG_NONE;
-    }
-
-    /* NUL-terminate overall response */
-    term_response[nchars_read] = '\0';
-
-    /* validate response */
-    if (nchars_read < 5
-	|| memcmp(term_response, "\033[?", 3) != 0
-	|| !(ptr = memchr(term_response, 'c', nchars_read)))
-    {
-	fputs("Malformed terminal attributes\n", stderr);
-	return INLINE_IMG_NONE;
-    }
-
-    /* NUL-terminate the specific portion of data that is the terminal response */
-    if (ptr[1])
-	ptr[1] = '\0';
 
     /* separate the response parameters by ';' and look for '4' */
-    ptr = term_response;
-    while ((ptr = strchr(ptr, ';'))) {
-	if (*++ptr != '4')
-	    continue;
-	switch (*++ptr) {
-	case ';':
-	case 'c':
-	    if (have_img2sixel())
-		return INLINE_IMG_SIXEL;
+    if (response) {
+	char *ptr = response;
+	while ((ptr = strchr(ptr, ';'))) {
+	    if (*++ptr != '4')
+		continue;
+	    switch (*++ptr) {
+	    case ';':
+	    case 'c':
+		if (have_img2sixel()) {
+		    ret = INLINE_IMG_SIXEL;
+		    goto end;
+		}
+	    }
 	}
-    }
+    } else
+	perror(errstr);
 
-    /* default */
-    return INLINE_IMG_NONE;
+end:
+    free(response);
+    return ret;
 }
 
 int
