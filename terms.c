@@ -856,6 +856,109 @@ put_image_sixel(char *url, int x, int y, int w, int h, int sx, int sy, int sw, i
     MOVE(Currentbuf->cursorY,Currentbuf->cursorX);
 }
 
+static int
+have_img2sixel(void)
+{
+    pid_t child_pid;
+    int wstatus;
+
+    if (getenv("W3M_IMG2SIXEL"))
+	return TRUE;
+
+    switch (child_pid = fork()) {
+    case -1:
+	return FALSE;
+    case 0:
+	close(STDOUT_FILENO);
+	close(STDERR_FILENO);
+	execlp("img2sixel", "img2sixel", "--version", NULL);
+	/* if exec fails */
+	_exit(-1);
+    default:
+	return
+#ifdef HAVE_WAITPID
+	    waitpid(child_pid, &wstatus, 0) != -1
+#else
+	    wait(&wstatus) != -1
+#endif
+	    && WIFEXITED(wstatus)
+	    && WEXITSTATUS(wstatus) == 0;
+    }
+}
+
+/* NB: in theory, user input could be snarfed up with the read(2); in
+ * practice, only museum pieces have such low latency, so we should get
+ * the device attributes (and only the device attributes) immediately. If
+ * ever this becomes an issue (which it won't), ungetch(3) can be used on
+ * any extraneous input */
+int
+img_protocol_test_for_sixel(void)
+{
+    static const char errstr[] = "Can't get terminal attributes";
+
+    /* the string in the following sizeof expression is what I think the
+     * largest possible response could be. See
+     *	https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
+     * for more information, specifically the section on CSI Ps c ("\e[c") */
+    char term_response[sizeof "\033[?65;1;2;3;4;6;8;9;15;16;17;18;21;22;28;29c"] = "";
+    char * ptr; /* general-purpose pointer to the above buffer */
+    ssize_t nchars_read;
+
+    /* request tty send primary device attributes */
+    write(tty, "\033[c", 3);
+
+    /* wait for stdin to become available; don't let us get stuck hanging
+     * indefinitely on a response that won't come */
+    {
+	int nret;
+	fd_set fds;
+	struct timeval timeout = { 0, 0.2 * 1000000 }; /* wait 0.2s, from terms.c */
+	FD_ZERO(&fds);
+	FD_SET(tty, &fds);
+	if ((nret = select(tty + 1, &fds, NULL, NULL, &timeout)) <= 0) {
+	    fprintf(stderr, "%s: %s\n", errstr, nret == 0 ? "timed out" : strerror(errno));
+	    return INLINE_IMG_NONE;
+	}
+    }
+
+    if ((nchars_read = read(tty, term_response, sizeof term_response - 1)) == -1) {
+	perror(errstr);
+	return INLINE_IMG_NONE;
+    }
+
+    /* NUL-terminate overall response */
+    term_response[nchars_read] = '\0';
+
+    /* validate response */
+    if (nchars_read < 5
+	|| memcmp(term_response, "\033[?", 3) != 0
+	|| !(ptr = memchr(term_response, 'c', nchars_read)))
+    {
+	fputs("Malformed terminal attributes\n", stderr);
+	return INLINE_IMG_NONE;
+    }
+
+    /* NUL-terminate the specific portion of data that is the terminal response */
+    if (ptr[1])
+	ptr[1] = '\0';
+
+    /* separate the response parameters by ';' and look for '4' */
+    ptr = term_response;
+    while ((ptr = strchr(ptr, ';'))) {
+	if (*++ptr != '4')
+	    continue;
+	switch (*++ptr) {
+	case ';':
+	case 'c':
+	    if (have_img2sixel())
+		return INLINE_IMG_SIXEL;
+	}
+    }
+
+    /* default */
+    return INLINE_IMG_NONE;
+}
+
 int
 get_pixel_per_cell(int *ppc, int *ppl)
 {
