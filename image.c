@@ -139,36 +139,34 @@ openImgdisplay()
 }
 
 static int
-protocol_test_environment(void)
+inline_img_protocol_autodetect(void)
 {
-    const char *envptr;
+    int result;
+    const char *env_term, *konsole_version;
 
-    if ((envptr = getenv("TERM"))) {
-	/* The purpose of strncmp(3) where used below is like the glob `prefix*',
-	 * or the regex `^prefix' */
-	if (strcmp(envptr, "xterm-kitty") == 0)
+    if ((env_term = getenv("TERM"))) {
+	if (strcmp(env_term, "xterm-kitty") == 0)
 	    return INLINE_IMG_KITTY;
-	if (strcmp(envptr, "xterm-ghostty") == 0)
+	if (strcmp(env_term, "xterm-ghostty") == 0)
 	    return INLINE_IMG_KITTY;
-	if (strncmp(envptr, "mlterm", 6) == 0)
-	    return INLINE_IMG_OSC5379;
 	/* yaft doesn't correctly respond to \e[c, but is sixel-capable
 	 * anyway. Thanks to hackerb9/lsix */
-	if (strncmp(envptr, "yaft", 4) == 0)
+	if (strncmp(env_term, "yaft", 4) == 0)
 	    return INLINE_IMG_SIXEL;
     }
 
-    if ((envptr = getenv("KONSOLE_VERSION")) && strcmp(envptr, "220770") >= 0)
+    if ((konsole_version = getenv("KONSOLE_VERSION"))
+	&& strcmp(konsole_version, "220770") >= 0)
 	return INLINE_IMG_KITTY;
 
-    return INLINE_IMG_NONE;
-}
+    if ((result = img_protocol_test_for_sixel()) != INLINE_IMG_NONE)
+	return result;
 
-static int
-inline_img_protocol_autodetect(void)
-{
-    int result = protocol_test_environment();
-    return result ? result : img_protocol_test_for_sixel();
+    /* If mlterm too old to support sixel, probably supports older OSC5379 */
+    if (env_term && strncmp(env_term, "mlterm", 6) == 0)
+	return INLINE_IMG_OSC5379;
+
+    return INLINE_IMG_NONE;
 }
 
 static void
