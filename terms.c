@@ -886,15 +886,6 @@ have_img2sixel(void)
     }
 }
 
-static void *
-realloc_or_free(void *const orig_ptr, size_t n)
-{
-    void *const new_ptr = realloc(orig_ptr, n);
-    if (!new_ptr)
-	free(orig_ptr);
-    return new_ptr;
-}
-
 /*
  * NB: in theory, user input could be snarfed up with the read(2); in practice,
  * only museum pieces have such low latency, so we should get the device
@@ -905,19 +896,14 @@ int
 img_protocol_test_for_sixel(void)
 {
     static const char errstr[] = "Can't get terminal attributes";
-    int ret = INLINE_IMG_NONE;
-    size_t response_size, len;
-    char *response;
+    size_t response_size = 256, len = 0;
+    char *response = GC_MALLOC_ATOMIC(response_size);
 
     /* request tty send primary device attributes */
     write(tty, "\033[c", 3);
 
     /* loop until we get the whole response */
-    for (
-	response = NULL, response_size = 256, len = 0;
-	(response = realloc_or_free(response, response_size)) != NULL;
-	response_size *= 2
-    ) {
+    for (; response; response = GC_REALLOC(response, response_size *= 2)) {
 	ssize_t nchars_read;
 	int nret;
 	fd_set fds;
@@ -928,19 +914,19 @@ img_protocol_test_for_sixel(void)
 	if ((nret = select(tty + 1, &fds, NULL, NULL, &timeout)) <= 0) {
 	    fprintf(stderr, "%s: %s\n",
 		errstr, nret == 0 ? "timed out" : strerror(errno));
-	    goto end;
+	    return INLINE_IMG_NONE;
 	}
 
 	nchars_read = read(tty, response + len, response_size - len - 1);
 	if (nchars_read < 0) {
 	    perror(errstr);
-	    goto end;
+	    return INLINE_IMG_NONE;
 	}
 
 	/* first useful iteration; validate response */
 	if (nchars_read + len >= 3 && memcmp(response, "\033[?", 3) != 0) {
 	    fputs("Malformed terminal attributes\n", stderr);
-	    goto end;
+	    return INLINE_IMG_NONE;
 	}
 
 	/* NUL-terminate the terminal response */
@@ -965,18 +951,15 @@ img_protocol_test_for_sixel(void)
 	    switch (*++ptr) {
 	    case ';':
 	    case 'c':
-		if (have_img2sixel()) {
-		    ret = INLINE_IMG_SIXEL;
-		    goto end;
-		}
+		if (have_img2sixel())
+		    return INLINE_IMG_SIXEL;
 	    }
 	}
     } else
 	perror(errstr);
 
-end:
-    free(response);
-    return ret;
+    /* default */
+    return INLINE_IMG_NONE;
 }
 
 int
