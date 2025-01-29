@@ -924,7 +924,9 @@ img_protocol_test_for_sixel(void)
 	}
 
 	/* first useful iteration; validate response */
-	if (nchars_read + len >= 3 && memcmp(response, "\033[?", 3) != 0) {
+	if (nchars_read + len >= 3 &&
+	    (memcmp(response, "\033[", 2) != 0 || !strchr("?=", response[2])))
+	{
 	    fputs("Malformed terminal attributes\n", stderr);
 	    return INLINE_IMG_NONE;
 	}
@@ -944,8 +946,10 @@ img_protocol_test_for_sixel(void)
 
     /* separate the response parameters by ';' and look for '4' */
     if (response) {
-	char *ptr = response;
-	while ((ptr = strchr(ptr, ';'))) {
+	char *ptr;
+	if (response[2] == '=')
+	    return INLINE_IMG_NONE; /* SyncTERM */
+	for (ptr = response; (ptr = strchr(ptr, ';'));) {
 	    if (*++ptr != '4')
 		continue;
 	    switch (*++ptr) {
